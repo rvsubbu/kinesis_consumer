@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"sync/atomic"
 
 	"github.com/aws/aws-sdk-go-v2/aws"
@@ -22,7 +21,7 @@ const (
 	// common
 	region = "us-east-1"
 	// region = "us-west-2"
-	streamName   = "my.kinesis.stream" // Update with your Kinesis stream name
+	streamName = "my.kinesis.stream" // Update with your Kinesis stream name
 	shardID = "shardId-000000000000" // Replace with your actual shard ID
 	shardIteratorType = types.ShardIteratorTypeTrimHorizon
 	// shardIteratorType = types.ShardIteratorTypeLatest
@@ -97,7 +96,7 @@ func lzmaDecompress(compressedData []byte) ([]byte, error) {
 	// Decompress the data
 	_, err = io.Copy(&decompressedData, lzmaReader)
 	if err != nil {
-		return nil, fmt.Errorf("failed to decompress data: %w", err)
+		return nil, fmt.Errorf("failed to decompress lzma data: %w", err)
 	}
 
 	return decompressedData.Bytes(), nil
@@ -105,6 +104,8 @@ func lzmaDecompress(compressedData []byte) ([]byte, error) {
 
 func zstdDecompress(compressedData []byte) ([]byte, error) {
 	zstdDec, _ := zstd.NewReader(nil)
+
+	// This is a hack, just traverse the byte stream until we find the zstd magic number sequence
 	var start int
 	for i, b := range compressedData {
 		if i < 3 {
@@ -130,9 +131,6 @@ func isZstdCompressed(data []byte) bool {
 	if len(data) < 4 {
 		return false
 	}
-    // return data[0] == 0x28 && data[1] == 0x49 && data[2] == 0x50 && data[3] == 0x32
-	// fmt.Printf("\tdata[0] = %x data[1] = %x data[2] = %x data[3] = %x\n", data[0], data[1], data[2], data[3])
-	// return data[0] == 0x27 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD
 	return data[0] == 0x28 && data[1] == 0xB5 && data[2] == 0x2F && data[3] == 0xFD
 }
 
@@ -144,7 +142,7 @@ func processKinesisRecords(client *kinesis.Client) {
 		ShardIteratorType: shardIteratorType,
 	})
 	if err != nil {
-		log.Fatalf("Unable to get shard iterator: %v", err)
+		panic(fmt.Sprintf("Unable to get shard iterator: %v", err))
 	}
 
 	shardIterator := shardIteratorResp.ShardIterator
@@ -157,55 +155,33 @@ func processKinesisRecords(client *kinesis.Client) {
 			Limit: aws.Int32(100),
 		})
 		if err != nil {
-			log.Fatalf("Failed to fetch records from Kinesis: %v", err)
+			panic(fmt.Sprintf("Failed to fetch records from Kinesis: %v", err))
 		}
-
 
 		// Process each record
 		for _, record := range resp.Records {
 			atomic.AddInt64(&count, 1)
 			fmt.Println("message #", atomic.LoadInt64(&count))
-			fmt.Printf("\tcompressed message len %d : ", len(record.Data))
+			fmt.Printf("\tcompressed message len %d\n", len(record.Data))
 			// fmt.Println("\tzstd compression", isZstdCompressed(record.Data))
 
 			var err error
 			var decompressedData []byte
 			if decompressedData, err = zstdDecompress(record.Data); err != nil {
-				// log.Printf("zstd decompression didn't work, err=%+v\n", err)
-				fmt.Printf("\tzstd decompression didn't work, err=%+v\n", err)
-				if decompressedData, err = lz4Decompress(record.Data); err != nil {
-					// log.Printf("lz4 decompression didn't work, err=%+v\n", err)
-					fmt.Printf("\tlz4 decompression didn't work, err=%+v\n", err)
-					if decompressedData, err = gzipDecompress(record.Data); err != nil {
-						// log.Printf("gzip decompression didn't work, err=%+v\n", err)
-						fmt.Printf("\tgzip decompression didn't work, err=%+v\n", err)
-						if decompressedData, err = lzmaDecompress(record.Data); err != nil {
-							// log.Printf("lzma decompression didn't work, err=%+v\n", err)
-							fmt.Printf("\tlzma decompression didn't work, err=%+v\n", err)
-							var start int
-							for i, b := range record.Data {
-								if b == '{' {
-									start = i
-									break
-								}
-							}
-							decompressedData = record.Data[start:len(record.Data)-16]
-							fmt.Println("\tno compression")
-							err = nil
-						}
+				fmt.Printf("\tzstd decompression didn't work, err=%+v, assuming no compression\n", err)
+				// This is a hack, just traverse the byte stream until we hit a starting brace "{" char
+				var start int
+				for i, b := range record.Data {
+					if b == '{' {
+						start = i
+						break
 					}
 				}
+				decompressedData = record.Data[start:len(record.Data)-16]
+				fmt.Println("\tno compression")
+				err = nil
 			}
-			if err == nil {
-				fmt.Println("\tDecompressed message", string(decompressedData))
-			} else {
-				fmt.Println("decompression failed, ignore and continue")
-				continue
-			}
-
-			//Convert decompressed data to string for logging
-			// log.Printf("Decompressed data: %s", string(decompressedData))
-			
+			fmt.Println("\tDecompressed message", string(decompressedData))
 		}
 
 		// Update the shard iterator for the next call
@@ -219,7 +195,7 @@ func main() {
 	// Load AWS config
 	cfg, err := config.LoadDefaultConfig(context.TODO(), config.WithRegion(region))
 	if err != nil {
-		log.Fatalf("unable to load SDK config, %v", err)
+		panic(fmt.Sprintf("unable to load SDK config, %v", err))
 	}
 
 	// Create a Kinesis client
